@@ -86,8 +86,13 @@ during the study (the app sends `v0` at start).
 6. Press S to save. Leave these thresholds fixed for every participant.
 
 ## 7. Running the study
+
+The person collecting the trials should follow [PARTNER.md](PARTNER.md).
+
+From this project folder:
+
 ```
-python -u fitts_app.py --pid P01 --port COM3
+python -u laptop_app/fitts_app.py --pid P01 --port COM3
 ```
 * **Setup screen:** live cursor, ESP messages, and operator keys (B background, C calibrate, M mirror, 0–3 orientation,
   S save). Read the instructions on screen to the participant, then press **ENTER**.
@@ -108,15 +113,21 @@ python -u fitts_app.py --pid P01 --port COM3
 are ignored by the analysis.
 
 ## 8. Data format
-`data/<PID>_<timestamp>.csv`, one row per attempt:
-`participant, phase, attempt, block, condition, success_index, D_px, W_px, ID_bits, direction, start_x, target_x,
-release_x, end_error_px, overlap, success, MT_ms, MT_host_ms, release_reason, input, timestamp`
 
-`data/<PID>_<timestamp>_session.json` holds the screen size, conditions, block order and ESP32 parameters.
+Starting the app always creates a **new** file. It never opens or fills in an older one.
 
-## 9. Analysis
 ```
-.venv\Scripts\python analysis\analyze.py
+python -u laptop_app/fitts_app.py --pid P01 --port COM3
 ```
-This writes `analysis/out/fitts_all_trials.png` (all successful trials, colour per participant, fit lines),
-`fitts_means.png`, `per_condition.csv` and `summary.txt` (a, b, R², throughput, unsuccessful counts).
+
+That command writes `data/P01_<year><month><day>_<hour><minute><second>.csv`, using the time the window opened. `P02` and `P03` each get their own file the same way. Every practice drop and every recorded drop is added to that file as it happens, including misses. Pressing Esc twice quits; the file is already saved.
+
+An old CSV is left untouched. `data/P01_20261116_013942.csv` only has the column names from a window that was closed before anyone dropped a bar. Delete it. Do not pack it in the zip as if it were a study.
+
+Each row is one attempt:
+
+`participant, phase, attempt, block, condition, success_index, D_px, W_px, ID_bits, direction, start_x, target_x, release_x, end_error_px, overlap, success, MT_ms, MT_host_ms, release_reason, input, timestamp`
+
+`participant` is the anonymous id (`P01`). `attempt` is the attempt number. `D_px`, `W_px`, and `ID_bits` are the distance, the width, and the index of difficulty. `MT_ms` is the movement time in milliseconds. `success` is 1 for a hit and 0 for a miss.
+
+`data/<PID>_<timestamp>_session.json` holds the screen size, conditions, block order, and ESP32 parameters.

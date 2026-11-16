@@ -1,68 +1,16 @@
-# Prerequisites
-*.d
+# Python environment / caches
+.venv/
+__pycache__/
+*.pyc
 
-# Compiled Object files
-*.slo
-*.lo
-*.o
-*.obj
+# PlatformIO build output
+.pio/
 
-# Precompiled Headers
-*.gch
-*.pch
+# Setup camera snapshots (contain people / rooms) - not part of the submission
+setup_snapshots/
 
-# Linker files
-*.ilk
+# Course handout (not ours to redistribute)
+Assignment3_FittsLaw_ESP32_Camera.pdf
 
-# Debugger Files
-*.pdb
-
-# Compiled Dynamic libraries
-*.so
-*.dylib
-*.dll
-*.so.*
-
-# Fortran module files
-*.mod
-*.smod
-
-# Compiled Static libraries
-*.lai
-*.la
-*.a
-*.lib
-
-# Executables
-*.exe
-*.out
-*.app
-
-# Build directories
-build/
-Build/
-build-*/
-
-# CMake generated files
-CMakeFiles/
-CMakeCache.txt
-cmake_install.cmake
-Makefile
-install_manifest.txt
-compile_commands.json
-
-# Temporary files
-*.tmp
-*.log
-*.bak
-*.swp
-
-# vcpkg
-vcpkg_installed/
-
-# debug information files
-*.dwo
-
-# test output & cache
-Testing/
-.cache/
+# Test runs (not study data)
+data/TEST_*

@@ -1,0 +1,5 @@
+pygame-ce
+pyserial
+numpy
+matplotlib
+fpdf2

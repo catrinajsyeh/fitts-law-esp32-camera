@@ -508,6 +508,7 @@ void loop() {
     for (int y = 0; y < IH; y += 4) { int j = 0; line[j++] = '#'; line[j++] = ' ';
       for (int x = 0; x < IW; x += 4) line[j++] = ramp[fb->buf[y * IW + x] * 10 / 256];
       line[j] = 0; Serial.println(line); }
+    Serial.flush();
   }
   if (fullReq) {                       // SETUP DIAGNOSTIC ONLY: one 160x120 frame as hex for placement checks
     fullReq = false; static const char hx[] = "0123456789abcdef"; char line[2 * IW + 4];

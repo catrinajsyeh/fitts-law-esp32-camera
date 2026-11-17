@@ -107,21 +107,68 @@ def williams_rows(n):
 class SerialInput:
     def __init__(self, port):
         from esp_console import open_port
-        self.ser = open_port(port)
+        self._open_port = open_port
+        self.port = port
+        self.ser = None
+        self.lock = threading.Lock()
         self.q = queue.Queue()
         self.log = []
         self.params_line = ""
         self.alive = True
         self.gray = None
+        self.reopens = 0
+        try:
+            self.ser = open_port(port)
+        except Exception as e:
+            self.q.put(("#", f"serial not open yet: {e}"))
         threading.Thread(target=self._run, daemon=True).start()
+
+    def _reopen(self):
+        """The board can reset when the port first opens. Try again a few times, then stop."""
+        if self.reopens >= 3:
+            time.sleep(1.0)
+            return
+        self.reopens += 1
+        with self.lock:
+            old = self.ser
+            self.ser = None
+        try:
+            if old is not None:
+                old.close()
+        except Exception:
+            pass
+        for _ in range(20):
+            if not self.alive:
+                return
+            try:
+                ser = self._open_port(self.port)
+            except Exception:
+                time.sleep(0.4)
+                continue
+            with self.lock:
+                self.ser = ser
+            self.q.put(("#", f"serial open {self.port}"))
+            return
+        self.q.put(("#", f"could not open {self.port}. Close anything else using it."))
 
     def _run(self):
         buf = b""; img = None
         while self.alive:
+            with self.lock:
+                ser = self.ser
+            if ser is None:
+                self._reopen()
+                continue
             try:
-                chunk = self.ser.read(max(1, self.ser.in_waiting))   # bulk read: readline() is slow on Windows
+                with self.lock:
+                    if self.ser is None:
+                        continue
+                    waiting = self.ser.in_waiting
+                    chunk = self.ser.read(waiting if waiting else 1)   # bulk read: readline() is slow on Windows
             except Exception as e:
-                self.q.put(("#", f"serial error: {e}")); time.sleep(0.5); continue
+                self.q.put(("#", f"serial error: {e}"))
+                self._reopen()
+                continue
             if not chunk:
                 continue
             host_t = time.perf_counter()
@@ -131,8 +178,7 @@ class SerialInput:
                 line = raw.decode(errors="replace").rstrip("\r")
                 if not line.strip():
                     continue
-                if line.startswith("#GRAY") or self.gray is not None:
-                    self._take_gray(line)
+                if self._take_gray(line):
                     continue
                 line = line.strip()
                 # SETUP-ONLY camera preview ('G' dump): assembled here, never used for recognition
@@ -151,18 +197,16 @@ class SerialInput:
                 self._parse(line, host_t)
 
     def _take_gray(self, line):
-        """40x30 setup preview. About 1.3 KB, so the cursor lines are not stuck behind it."""
+        """40x30 setup preview. Cursor lines in the same burst must not throw the frame away."""
         if line.startswith("#GRAY"):
             self.gray = []
-            return
-        if not line.startswith("#"):
-            self.gray = None
-            self._parse(line.strip(), time.perf_counter())
-            return
-        row = line[2:] if line.startswith("# ") else line[1:]
+            return True
+        if self.gray is None or not line.startswith("# "):
+            return False
+        row = line[2:]
         self.gray.append(row[:40].ljust(40))
         if len(self.gray) < 30:
-            return
+            return True
         ramp = " .:-=+*#%@"
         vals = bytearray(30 * 40)
         for y, row in enumerate(self.gray[:30]):
@@ -171,6 +215,7 @@ class SerialInput:
                 vals[y * 40 + x] = 0 if i < 0 else int(i * 255 / 9)
         self.q.put(("GRAY", bytes(vals)))
         self.gray = None
+        return True
 
     def _parse(self, line, host_t):
         if True:
@@ -190,7 +235,14 @@ class SerialInput:
                 pass
 
     def send(self, cmd):
-        self.ser.write((cmd + "\n").encode())
+        data = (cmd + "\n").encode()
+        with self.lock:
+            if self.ser is None:
+                return
+            try:
+                self.ser.write(data)
+            except Exception as e:
+                self.q.put(("#", f"serial write error: {e}"))
 
     def events(self):
         out = []
@@ -257,6 +309,7 @@ class Study:
         self.state = "IDLE"; self.feedback_until = 0; self.last_result = None; self.hint_until = 0
         self.cal_until = 0
         self.preview = None; self.preview_req = 0.0   # setup-only camera thumbnail
+        self.board_note = "Waiting for the board to boot. The picture shows up in the box on the left."
         self.esc_at = -10000                          # time of the first ESC press
         # --debug: per-frame recognition stats are printed to the console (setup/testing only)
         self.inp.send("v1" if getattr(args, "debug", False) else "v0"); self.inp.send("p")
@@ -286,6 +339,7 @@ class Study:
                 a = np.frombuffer(ev[1], dtype=np.uint8).reshape(30, 40)
                 rgb = np.repeat(a[:, :, None], 3, axis=2).transpose(1, 0, 2).copy()
                 self.preview = pygame.transform.scale(pygame.surfarray.make_surface(rgb), (480, 360))
+                self.board_note = "Camera is on. Ceiling should show around the hand."
             return
         if kind == "IMG":                # setup-screen picture only, not used for recognition
             if self.phase == "SETUP":
@@ -297,6 +351,12 @@ class Study:
             print(ev[1], flush=True)
             if not ev[1].startswith("#V"):
                 self.msgs = (self.msgs + [ev[1]])[-10:]
+            text = ev[1]
+            if self.preview is None:
+                if text.startswith("#ready") or text.startswith("serial open"):
+                    self.board_note = "Board is on. Waiting for the first picture."
+                elif "serial" in text.lower() or "camera error" in text or text.startswith("could not open"):
+                    self.board_note = text[:90]
             return
         if kind == "T":
             self.tracking = ev[2]; return
@@ -415,97 +475,175 @@ class Study:
         scr.fill(COL["bg"])
         now = pygame.time.get_ticks()
         if self.phase == "SETUP":
-            lines = ["Fitts' Law study - ESP32 camera hand interface", "",
-                     "SETUP CHECK (rest your elbow on the desk, move only the forearm):",
-                     "  1. Move the OPEN hand left/right: the cursor should follow in the same direction (press M if reversed).",
-                     "  2. A comfortable sweep should reach both screen edges (press C, then sweep the open hand for 6 s).",
-                     "  3. Hold the hand still: the cursor should stay still.",
-                     "  4. Make a FIST: the cursor dot fills in (GRAB).  OPEN the hand: it becomes a ring (RELEASE).",
-                     "",
-                     "TASK: move the cursor onto the ORANGE bar, make a FIST to grab it, drag it onto the BLUE bar,",
-                     "      then OPEN the hand to drop it.  Work as quickly and accurately as you can.",
-                     "",
-                     "ENTER = start practice. The camera picture turns off, and only the cursor remains.",
-                     "Operator keys:  B background (hand out of view)   C calibrate   M mirror   0-3 arm edge   S save"]
-            for i, s in enumerate(lines):
-                scr.blit((big if i == 0 else mid).render(s, True, COL["text"]), (60, 60 + i * 46))
-            if self.preview is not None:
-                px = self.sw - 480 - 40
-                scr.blit(self.preview, (px, 60))
-                pygame.draw.rect(scr, COL["dim"], (px, 60, 480, 360), 1)
-                scr.blit(small.render("Raise the hand until ceiling shows around it. Fist fills the dot.", True, COL["dim"]), (px, 428))
-            if now < self.cal_until:
-                left = (self.cal_until - now) / 1000
-                img = big.render(f"CALIBRATING {left:.0f} s - sweep the OPEN hand slowly to your far LEFT and far RIGHT",
-                                 True, COL["warn"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, self.cy - 110))
-            elif self.cal_until and now < self.cal_until + 4000:
-                img = mid.render("Calibration done - press S to save, then check the cursor reaches both edges",
-                                 True, COL["ok"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, self.cy - 110))
-            if self.tracking:
-                st = "GRAB (fist)" if self.button else "OPEN hand (hover)"
-                img = big.render(f"Hand: {st}", True, COL["ok"] if not self.button else COL["obj"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, self.cy + 70))
-            for i, s in enumerate(self.msgs):
-                scr.blit(small.render(s, True, COL["dim"]), (60, self.sh - 320 + i * 28))
-            pygame.draw.rect(scr, COL["target"], (0, self.cy - 6, self.sw, 12), 1)
+            self._draw_setup(scr, big, mid, small, now)
         elif self.phase in ("BREAK", "DONE"):
             msg = self.break_msg if self.phase == "BREAK" else "All blocks complete - thank you!"
             sub = "Press SPACE to continue." if self.phase == "BREAK" else f"Data saved to {os.path.basename(self.csv_path)}. Press ESC."
-            for i, (s, f) in enumerate([(msg, big), (sub, mid)]):
-                img = f.render(s, True, COL["text"]); scr.blit(img, (self.sw / 2 - img.get_width() / 2, self.cy - 80 + i * 70))
+            self._centered(scr, big, msg, self.cy - 50, COL["text"])
+            self._centered(scr, mid, sub, self.cy + 20, COL["text"])
         else:
-            w, top = self.W, self.cy - BAR_HEIGHT / 2
-            pygame.draw.rect(scr, COL["target"], (self.target_x - w / 2, top, w, BAR_HEIGHT))
-            pygame.draw.rect(scr, COL["target_edge"], (self.target_x - w / 2, top, w, BAR_HEIGHT), 3)
-            oc = COL["obj_drag"] if self.state == "DRAG" else COL["obj"]
-            if self.state == "FEEDBACK":
-                oc = COL["ok"] if self.last_result else COL["bad"]
-            pygame.draw.rect(scr, oc, (self.obj_x - w / 2, top, w, BAR_HEIGHT))
-            if self.state == "FEEDBACK":
-                s = "HIT" if self.last_result else ("SKIPPED - counted as a miss" if getattr(self, "skipped", False) else "MISS - try again")
-                img = big.render(s, True, COL["ok"] if self.last_result else COL["bad"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, top - 110))
-            if self.button and self.state == "WAIT_GRAB":
-                img = mid.render("Fist closed OFF the orange bar - OPEN your hand, aim at the orange bar, then make a fist",
-                                 True, COL["warn"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, top - 70))
-            elif now < self.hint_until:
-                img = mid.render("Grab while the cursor is on the orange bar", True, COL["warn"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, top + BAR_HEIGHT + 40))
-            if self.phase == "PRACTICE":
-                st = f"PRACTICE {self.practice_i + 1}/{len(self.practice_seq)}"
-            else:
-                st = f"Block {self.block_i + 1}/{len(self.block_order)}   hits {self.succ_in_block}/{SUCCESS_PER_CONDITION}"
-            scr.blit(small.render(st, True, COL["dim"]), (30, 20))
-            if self.phase == "PRACTICE":
-                img = mid.render("Cursor onto ORANGE bar -> FIST (grab) -> drag onto BLUE bar -> OPEN hand (drop)",
-                                 True, COL["dim"])
-                scr.blit(img, (self.sw / 2 - img.get_width() / 2, self.sh - 120))
+            self._draw_trial(scr, big, mid, small, now)
         if now - self.esc_at < 2000:
-            q = big.render("Press ESC again to QUIT (data so far is saved)", True, COL["bad"])
-            scr.blit(q, (self.sw / 2 - q.get_width() / 2, self.sh - 220))
-        img = small.render("K = skip attempt (counts as a miss)   ESC = quit"
-                           if self.phase in ("PRACTICE", "RECORDED") else "ESC = quit", True, COL["dim"])
-        scr.blit(img, (self.sw - img.get_width() - 30, 20))
-        # cursor (1-D: drawn on the common centre line of object and target)
-        x = int(self.cursor_x)
-        pygame.draw.line(scr, COL["cursor"], (x, self.cy - 30), (x, self.cy + 30), 3)
-        pygame.draw.circle(scr, COL["cursor"], (x, self.cy), 12 if self.button else 8, 0 if self.button else 2)
-        if not self.tracking:
-            img = mid.render("HAND NOT DETECTED - move your hand over the camera", True, COL["warn"])
-            scr.blit(img, (self.sw / 2 - img.get_width() / 2, 70))
-        elif self.hand_y > 0.66 and not self.button:     # only judged while the hand is open
+            self._centered(scr, mid, "Press ESC again to quit. Data so far is saved.", self.sh - mid.get_height() - 8, COL["bad"])
+        quit_label = "K = skip attempt (counts as a miss)    ESC = quit" if self.phase in ("PRACTICE", "RECORDED") else "ESC = quit"
+        img = small.render(quit_label, True, COL["dim"])
+        scr.blit(img, (self.sw - img.get_width() - 16, 10))
 
-            img = big.render("Reach FURTHER forward - your hand is at the edge of the camera view", True, COL["warn"])
-            scr.blit(img, (self.sw / 2 - img.get_width() / 2, 70))
-        # hand-position gauge (left edge): green zone = hand well inside the camera view
-        gx, gy0, gh = 14, self.cy - 150, 300
-        pygame.draw.rect(scr, COL["dim"], (gx, gy0, 10, gh), 1)
-        pygame.draw.rect(scr, COL["ok"], (gx, gy0, 10, int(gh * 0.66)), 0)
+    def _draw_setup(self, scr, big, mid, small, now):
+        lay = self._setup_layout(big)
+        self._blit_wrapped(scr, big, "Fitts' Law study", 16, 8, self.sw - 220, COL["text"], big.get_linesize())
+        lines = ["Elbow on the desk. Move only the forearm.",
+                 "1. OPEN hand left/right. Cursor follows. Press M if it is backwards.",
+                 "2. Press C, sweep for 6 s, until the cursor reaches both edges.",
+                 "3. Hold still. The cursor should stay still.",
+                 "4. FIST fills the dot. OPEN hand makes it a ring.",
+                 "Task: cursor on the ORANGE bar, FIST to grab, drag onto the BLUE bar, OPEN to drop.",
+                 "Work quickly and accurately. ENTER starts practice and turns the camera off.",
+                 "Keys: B background (hand out)  C sweep  M mirror  0-3 arm edge  S save"]
+        line_h = small.get_linesize() + 2
+        y = lay["text"][1]
+        for s in lines:
+            if y + line_h > lay["lane_y"] - 8:
+                break
+            y = self._blit_wrapped(scr, small, s, lay["text"][0], y, lay["text"][2], COL["text"], line_h)
+        if now < self.cal_until and y + line_h < lay["lane_y"] - 8:
+            left = (self.cal_until - now) / 1000
+            y = self._blit_wrapped(scr, small, f"Calibrating {left:.0f} s. Sweep the OPEN hand to both sides.",
+                                   lay["text"][0], y + 6, lay["text"][2], COL["warn"], line_h)
+        elif self.cal_until and now < self.cal_until + 4000 and y + line_h < lay["lane_y"] - 8:
+            y = self._blit_wrapped(scr, small, "Sweep saved in memory. Press S to keep it, then check both edges.",
+                                   lay["text"][0], y + 6, lay["text"][2], COL["ok"], line_h)
+        if self.tracking and y + line_h < lay["lane_y"] - 8:
+            st = "Hand: FIST (grab)" if self.button else "Hand: OPEN"
+            self._blit_wrapped(scr, mid, st, lay["text"][0], y + 8, lay["text"][2],
+                               COL["obj"] if self.button else COL["ok"], mid.get_linesize())
+        pygame.draw.rect(scr, COL["target"], (16, lay["lane_y"], self.sw - 32, 8), 1)
+        x = int(self.cursor_x)
+        x = min(self.sw - 20, max(20, x))
+        pygame.draw.circle(scr, COL["cursor"], (x, lay["lane_y"] + 4), 10 if self.button else 7, 0 if self.button else 2)
+        msg_y = lay["lane_y"] + 16
+        for s in self.msgs[-3:]:
+            if msg_y + small.get_linesize() > self.sh - 4:
+                break
+            scr.blit(small.render(s[:110], True, COL["dim"]), (16, msg_y))
+            msg_y += small.get_linesize()
+        self._draw_camera(scr, small, lay["cam"])
+
+    def _draw_trial(self, scr, big, mid, small, now):
+        w, top = self.W, self.cy - BAR_HEIGHT / 2
+        pygame.draw.rect(scr, COL["target"], (self.target_x - w / 2, top, w, BAR_HEIGHT))
+        pygame.draw.rect(scr, COL["target_edge"], (self.target_x - w / 2, top, w, BAR_HEIGHT), 3)
+        oc = COL["obj_drag"] if self.state == "DRAG" else COL["obj"]
+        if self.state == "FEEDBACK":
+            oc = COL["ok"] if self.last_result else COL["bad"]
+        pygame.draw.rect(scr, oc, (self.obj_x - w / 2, top, w, BAR_HEIGHT))
+        if self.state == "FEEDBACK":
+            s = "HIT" if self.last_result else ("SKIPPED - counted as a miss" if getattr(self, "skipped", False) else "MISS - try again")
+            self._centered(scr, big, s, self._above_bars(top, big.get_height()), COL["ok"] if self.last_result else COL["bad"])
+        if self.button and self.state == "WAIT_GRAB":
+            self._centered(scr, small, "Fist closed off the orange bar. Open your hand, aim, then make a fist.",
+                           self._above_bars(top, small.get_height()), COL["warn"])
+        elif now < self.hint_until:
+            self._centered(scr, small, "Grab while the cursor is on the orange bar.",
+                           min(self.sh - 36, top + BAR_HEIGHT + 12), COL["warn"])
+        if self.phase == "PRACTICE":
+            st = f"PRACTICE {self.practice_i + 1}/{len(self.practice_seq)}"
+        else:
+            st = f"Block {self.block_i + 1}/{len(self.block_order)}   hits {self.succ_in_block}/{SUCCESS_PER_CONDITION}"
+        scr.blit(small.render(st, True, COL["dim"]), (16, 8))
+        if self.phase == "PRACTICE":
+            self._centered(scr, small, "ORANGE bar, FIST to grab, drag onto BLUE, OPEN to drop.",
+                           self.sh - small.get_height() - 8, COL["dim"])
+        x = int(self.cursor_x)
+        pygame.draw.line(scr, COL["cursor"], (x, self.cy - 24), (x, self.cy + 24), 3)
+        pygame.draw.circle(scr, COL["cursor"], (x, self.cy), 11 if self.button else 7, 0 if self.button else 2)
+        if not self.tracking:
+            self._centered(scr, small, "Hand not detected. Move your hand over the camera.",
+                           self._above_bars(top, small.get_height()), COL["warn"])
+        elif self.hand_y > 0.66 and not self.button:
+            self._centered(scr, small, "Reach further forward. Your hand is at the edge of the camera.",
+                           self._above_bars(top, small.get_height()), COL["warn"])
+        gh = min(220, max(80, int(BAR_HEIGHT * 0.7)))
+        gx, gy0 = 8, int(self.cy - gh / 2)
+        pygame.draw.rect(scr, COL["dim"], (gx, gy0, 8, gh), 1)
+        pygame.draw.rect(scr, COL["ok"], (gx, gy0, 8, int(gh * 0.66)), 0)
         if self.tracking:
-            pygame.draw.circle(scr, COL["text"], (gx + 5, gy0 + int(gh * min(1.0, self.hand_y))), 8)
+            pygame.draw.circle(scr, COL["text"], (gx + 4, gy0 + int(gh * min(1.0, self.hand_y))), 6)
+
+    def _above_bars(self, top, text_h):
+        y = top - text_h - 10
+        if y < 28:
+            y = 28
+        return y
+
+    def _setup_layout(self, title_font):
+        margin = 16
+        top = 12 + title_font.get_linesize() + 8
+        footer = 72 if self.sh < 820 else 100
+        lane_y = self.sh - footer
+        room_h = lane_y - top - 8
+        side = self.sw >= 1100 and room_h >= 280
+        if side:
+            pw = min(400, int(self.sw * 0.30))
+            ph = min(int(pw * 0.75), room_h - 24)
+            return dict(cam=(margin, top, pw, max(140, ph)),
+                        text=(margin + pw + 20, top, self.sw - (margin + pw + 20) - margin),
+                        lane_y=lane_y)
+        pw = min(460, self.sw - 2 * margin)
+        ph = min(200, max(120, int(room_h * 0.36)))
+        return dict(cam=((self.sw - pw) // 2, top, pw, ph),
+                    text=(margin, top + ph + 28, self.sw - 2 * margin),
+                    lane_y=lane_y)
+
+    def _centered(self, scr, font, text, y, color):
+        max_w = self.sw - 48
+        words, lines, line = text.split(" "), [], ""
+        for word in words:
+            trial = word if not line else line + " " + word
+            if font.size(trial)[0] <= max_w or not line:
+                line = trial
+            else:
+                lines.append(line)
+                line = word
+        if line:
+            lines.append(line)
+        for i, row in enumerate(lines[:3]):
+            img = font.render(row, True, color)
+            scr.blit(img, (self.sw / 2 - img.get_width() / 2, y + i * (font.get_linesize() + 1)))
+
+    def _blit_wrapped(self, scr, font, text, x, y, max_w, color, line_h):
+        if y + line_h > self.sh - 4:
+            return y
+        if not text:
+            return y + line_h
+        line = ""
+        for word in text.split(" "):
+            trial = word if not line else line + " " + word
+            if font.size(trial)[0] <= max(40, max_w) or not line:
+                line = trial
+            else:
+                scr.blit(font.render(line, True, color), (x, y))
+                y += line_h
+                line = word
+        if line and y + line_h <= self.sh - 2:
+            scr.blit(font.render(line, True, color), (x, y))
+            y += line_h
+        return y
+
+    def _draw_camera(self, scr, small, box):
+        px, py, pw, ph = box
+        pygame.draw.rect(scr, (12, 12, 14), (px, py, pw, ph))
+        if self.preview is not None:
+            scr.blit(pygame.transform.scale(self.preview, (pw, ph)), (px, py))
+            cap = "Ceiling around the hand. Fist fills the dot."
+            if self.tracking and self.hand_y > 0.66 and not self.button:
+                cap = "Hand is too low in the picture. Raise it."
+        else:
+            self._blit_wrapped(scr, small, self.board_note, px + 12, py + 16, pw - 24, COL["text"], small.get_linesize() + 2)
+            cap = "Camera. It can take a few seconds to appear."
+        pygame.draw.rect(scr, COL["obj"], (px, py, pw, ph), 3)
+        if py + ph + small.get_linesize() < self.sh - 4:
+            scr.blit(small.render(cap, True, COL["dim"]), (px, py + ph + 4))
 
     def close(self):
         self.save_meta(); self.f.close()
@@ -515,6 +653,16 @@ class Study:
 SCAN_KEYS = {14: pygame.K_k, 5: pygame.K_b, 6: pygame.K_c, 16: pygame.K_m, 22: pygame.K_s, 19: pygame.K_p,
              39: pygame.K_0, 30: pygame.K_1, 31: pygame.K_2, 32: pygame.K_3,
              40: pygame.K_RETURN, 88: pygame.K_RETURN, 41: pygame.K_ESCAPE, 44: pygame.K_SPACE}
+
+
+def ui_fonts(screen_h):
+    """Sizes follow the screen. Font names cover Windows and macOS."""
+    scale = min(1.0, max(0.78, screen_h / 1000.0))
+    sans = "segoeui,helveticaneue,helvetica,arial,freesans,dejavusans"
+    mono = "consolas,menlo,monaco,dejavusansmono,couriernew,freemono"
+    return (pygame.font.SysFont(sans, max(22, int(34 * scale)), bold=True),
+            pygame.font.SysFont(sans, max(16, int(22 * scale))),
+            pygame.font.SysFont(mono, max(13, int(16 * scale))))
 
 
 def widest_monitor():
@@ -566,8 +714,7 @@ def main():
     pygame.key.stop_text_input()          # no IME composition: keys arrive as plain KEYDOWN events
     pygame.display.set_caption("Fitts ESP32 study")
     pygame.mouse.set_visible(a.mouse)
-    fonts = (pygame.font.SysFont("segoeui", 44, bold=True), pygame.font.SysFont("segoeui", 30),
-             pygame.font.SysFont("consolas", 22))
+    fonts = ui_fonts(sh)
     scaled = fit_task_to_screen(sw, sh)
     inp = MouseInput(sw) if a.mouse else SerialInput(a.port)
     st = Study(a, sw, sh, inp)

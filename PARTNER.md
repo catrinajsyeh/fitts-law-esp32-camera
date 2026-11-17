@@ -28,7 +28,7 @@ Keep the hand out of the picture for a few seconds at the start so the board can
 
 ## What to check before any trials
 
-The camera picture is only in the upper-right corner of the setup screen. Look at it, then do these checks in order. Stop at the first one that fails.
+The camera picture is the orange box on the setup screen. On a wide screen it sits on the left. On a short laptop it sits on top, and the cursor for the setup check is the dot on the line near the bottom. It is not there the instant the window opens. The board takes a few seconds to boot, then the ceiling shows up in that box. If the box stays on "waiting", close the window, unplug the board, plug it back in, and start the same command again. Nothing else can be using COM3. On a Mac the port is not COM3. Find it with `ls /dev/cu.*` and pass that path as `--port`. Look at the picture, then do these checks in order. Stop at the first one that fails.
 
 1. The small picture shows ceiling around the hand. If it is only skin, the hand is too close. Raise it.
 2. Move the open hand slowly left and right. The cursor should move the same way and stay still when the hand stays still. Press **M** if it moves backward.

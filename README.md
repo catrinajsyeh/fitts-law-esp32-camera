@@ -55,7 +55,7 @@ are rejected as outliers. After 150 ms without a hand the device sends `T,0`. If
 needs 3 stable frames. The cursor then **continues from where it was** (offset re-anchored, no jump).
 
 ## 5. Communication (ESP32 → laptop)
-Only recognised input events are sent during practice and recorded trials. A small camera picture is shown on the setup screen only, so the hand can be placed before the first trial. It is not used for recognition, and it turns off when practice starts.
+Only recognised input events are sent during practice and recorded trials. A small camera picture is shown in the orange box on the setup screen, so the hand can be placed before the first trial. The box is on the left when the screen is wide, and on top when the screen is short. It can take a few seconds after the window opens, while the board boots. It is not used for recognition, and it turns off when practice starts.
 ```
 M,<t_ms>,<x>,<y>        cursor position, 0..10000   (every processed frame while tracking)
 B,<t_ms>,<1|0>,<g|l>    button press / release (g = gesture, l = forced by tracking loss)

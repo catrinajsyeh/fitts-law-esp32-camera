@@ -1,0 +1,73 @@
+{
+  "participant": "P03",
+  "csv": "P03_20261116_184139.csv",
+  "screen_px": [
+    1440,
+    900
+  ],
+  "widths_px": [
+    120,
+    240,
+    480
+  ],
+  "distances_px": [
+    264,
+    528,
+    880
+  ],
+  "bar_height_px": 420,
+  "overlap_criterion": 0.8,
+  "success_per_condition": 10,
+  "practice_attempts": 5,
+  "block_order": [
+    {
+      "condition": 2,
+      "D": 880,
+      "W": 120
+    },
+    {
+      "condition": 3,
+      "D": 264,
+      "W": 240
+    },
+    {
+      "condition": 1,
+      "D": 528,
+      "W": 120
+    },
+    {
+      "condition": 4,
+      "D": 528,
+      "W": 240
+    },
+    {
+      "condition": 0,
+      "D": 264,
+      "W": 120
+    },
+    {
+      "condition": 5,
+      "D": 880,
+      "W": 240
+    },
+    {
+      "condition": 8,
+      "D": 880,
+      "W": 480
+    },
+    {
+      "condition": 6,
+      "D": 264,
+      "W": 480
+    },
+    {
+      "condition": 7,
+      "D": 528,
+      "W": 480
+    }
+  ],
+  "esp32_params": "diffT=22 polarity=0 orient=0 mirror=1 xmin=0.126 xmax=0.522 minArea=150 bandRows=30 fingerRows=45 openRuns=3 fistRuns=1 nConfirm=3 pendMax=12 lostMs=150 lostRelMs=500 oeMinCut=1.000 oeBeta=0.00070",
+  "input": "esp32",
+  "recorded_failures": 24,
+  "saved": "2026-11-16T18:57:54"
+}

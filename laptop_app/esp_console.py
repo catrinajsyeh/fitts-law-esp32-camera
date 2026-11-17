@@ -17,15 +17,21 @@ def open_port(port):
     import serial
     s = serial.Serial()
     s.port, s.baudrate, s.timeout = port, 115200, 0.1
-    s.dtr = False
-    s.rts = False
+    if sys.platform == "win32":
+        s.dtr = False
+        s.rts = False
     s.open()
     return s
 
 
 def reader(ser, show_moves, stop):
     while not stop.is_set():
-        line = ser.readline().decode(errors="replace").rstrip()
+        try:
+            line = ser.readline().decode(errors="replace").rstrip()
+        except Exception as e:
+            print(f"[read error] {type(e).__name__}: {e}", flush=True)
+            time.sleep(0.3)
+            continue
         if not line:
             continue
         if line.startswith("M,") and not show_moves:
@@ -57,6 +63,7 @@ def main():
         except KeyboardInterrupt:
             pass
     stop.set()
+    t.join(timeout=1)
     ser.close()
 
 
